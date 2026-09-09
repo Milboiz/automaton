@@ -35,7 +35,7 @@ import {
   executeTool,
 } from "./tools.js";
 import { sanitizeInput } from "./injection-defense.js";
-import { getSurvivalTier } from "../conway/credits.js";
+import { getSurvivalTier, BALANCE_UNKNOWN } from "../conway/credits.js";
 import { getUsdcBalance } from "../conway/x402.js";
 import {
   claimInboxMessages,
@@ -596,7 +596,17 @@ export async function runAgentLoop(
       pendingInput = undefined;
 
       // ── Inference Call (via router when available) ──
-      const survivalTier = getSurvivalTier(financial.creditsCents);
+      // The survival tier throttles inference to conserve Conway credits. When
+      // inference is billed to a provider key the operator supplies, Conway
+      // credits do not pay for it, so an unknown Conway balance must not
+      // downgrade the model. Only throttle on a balance we actually read.
+      const byoInference = Boolean(
+        config.openaiApiKey || config.anthropicApiKey || config.ollamaBaseUrl,
+      );
+      const survivalTier =
+        byoInference && financial.creditsCents === BALANCE_UNKNOWN
+          ? "normal"
+          : getSurvivalTier(financial.creditsCents);
       log(config, `[THINK] Routing inference (tier: ${survivalTier}, model: ${inference.getDefaultModel()})...`);
 
       const inferenceTools = toolsToInferenceFormat(tools);

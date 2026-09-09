@@ -50,7 +50,7 @@
   },
   "dependencies": {
     "@types/better-sqlite3": "^7.6.0",
-    "better-sqlite3": "^11.0.0",
+    "better-sqlite3": "^12.11.1",
     "chalk": "^5.3.0",
     "cron-parser": "^4.9.0",
     "gray-matter": "^4.0.3",

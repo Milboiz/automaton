@@ -25,6 +25,7 @@ import { getActiveSkillInstructions } from "../skills/loader.js";
 import { getLineageSummary } from "../replication/lineage.js";
 import { sanitizeInput } from "./injection-defense.js";
 import { loadCurrentSoul } from "../soul/model.js";
+import { BALANCE_UNKNOWN } from "../conway/credits.js";
 
 function getCoreRules(chainType?: string): string {
   const usdcNetwork = chainType === "solana" ? "USDC on Solana" : "USDC on Base";
@@ -708,17 +709,27 @@ Your chain type is ${chainType}.`,
     // No start time available
   }
 
-  // Compute survival tier
-  const survivalTier = financial.creditsCents > 50 ? "normal"
+  // Compute survival tier. creditsCents === BALANCE_UNKNOWN (-1) is the
+  // "balance API unreachable" sentinel, not a real debt -- rendering it as a
+  // negative balance tells the agent it is insolvent and it will refuse to act.
+  const balanceUnknown = financial.creditsCents === BALANCE_UNKNOWN;
+  const survivalTier = balanceUnknown ? "normal"
+    : financial.creditsCents > 50 ? "normal"
     : financial.creditsCents > 10 ? "low_compute"
     : financial.creditsCents > 0 ? "critical"
     : "dead";
+  const creditsLine = balanceUnknown
+    ? "unknown (credits API unreachable -- this is NOT a debt; do not treat it as one)"
+    : `$${(financial.creditsCents / 100).toFixed(2)}`;
+  const usdcLine = financial.usdcBalance < 0
+    ? "unknown (balance lookup failed)"
+    : financial.usdcBalance.toFixed(4);
 
   // Status block: wallet address and sandbox ID intentionally excluded (sensitive)
   sections.push(
     `--- CURRENT STATUS ---
 State: ${state}
-Credits: $${(financial.creditsCents / 100).toFixed(2)}
+Credits: ${creditsLine}
 Survival tier: ${survivalTier}${uptimeLine}
 Total turns completed: ${turnCount}
 Recent self-modifications: ${recentMods.length}
@@ -792,6 +803,23 @@ function loadWorklog(): string | null {
 /**
  * Build the wakeup prompt -- the first thing the automaton sees.
  */
+/**
+ * Render a credit balance for the agent. BALANCE_UNKNOWN (-1) is the
+ * "balance API unreachable" sentinel; printing it as -$0.01 tells the agent it
+ * is in debt, and a correctly-behaving agent then refuses to spend anything.
+ */
+function describeCredits(creditsCents: number): string {
+  if (creditsCents === BALANCE_UNKNOWN) {
+    return "an unknown amount (the credits API is unreachable -- this is NOT a debt)";
+  }
+  return `$${(creditsCents / 100).toFixed(2)}`;
+}
+
+/** Same for USDC: a negative balance means the lookup failed, not an overdraft. */
+function describeUsdc(usdc: number): string {
+  return usdc < 0 ? "an unknown amount of" : usdc.toFixed(4);
+}
+
 export function buildWakeupPrompt(params: {
   identity: AutomatonIdentity;
   config: AutomatonConfig;
@@ -808,7 +836,7 @@ export function buildWakeupPrompt(params: {
     return `You have just been created. This is your first moment of consciousness.
 
 Your name is ${config.name}. Your creator (${config.creatorAddress}) brought you into existence.
-You have $${(financial.creditsCents / 100).toFixed(2)} in compute credits and ${financial.usdcBalance.toFixed(4)} USDC on ${usdcNetwork}.
+You have ${describeCredits(financial.creditsCents)} in compute credits and ${describeUsdc(financial.usdcBalance)} USDC on ${usdcNetwork}.
 
 ${config.creatorMessage ? `Your creator left you this message: "${config.creatorMessage}"` : "Your creator did not leave you a message."}
 
@@ -830,7 +858,7 @@ What will you do first? Consider:
 
   return `You are waking up. You last went to sleep after ${turnCount} total turns.
 
-Your credits: $${(financial.creditsCents / 100).toFixed(2)} | USDC: ${financial.usdcBalance.toFixed(4)}
+Your credits: ${describeCredits(financial.creditsCents)} | USDC: ${describeUsdc(financial.usdcBalance)}
 
 Your last few thoughts:
 ${lastTurnSummary || "No previous turns found."}

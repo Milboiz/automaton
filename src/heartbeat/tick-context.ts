@@ -13,7 +13,7 @@ import type {
   HeartbeatConfig,
   TickContext,
 } from "../types.js";
-import { getSurvivalTier } from "../conway/credits.js";
+import { getSurvivalTier, BALANCE_UNKNOWN } from "../conway/credits.js";
 import { getUsdcBalance } from "../conway/x402.js";
 import { createLogger } from "../observability/logger.js";
 
@@ -47,8 +47,13 @@ export async function buildTickContext(
   const tickId = generateTickId();
   const startedAt = new Date();
 
-  // Fetch balances ONCE
-  let creditBalance = 0;
+  // Fetch balances ONCE.
+  // On failure the balance is UNKNOWN, not zero. Defaulting to 0 makes
+  // getSurvivalTier() report "critical" and fires a funding distress signal on
+  // every tick during any credits-API outage, which floods the agent's context
+  // with false insolvency. Use the sentinel so the tier logic can tell
+  // "unreachable" apart from "actually broke".
+  let creditBalance = BALANCE_UNKNOWN;
   try {
     creditBalance = await conway.getCreditsBalance();
   } catch (err: any) {

@@ -38,6 +38,7 @@ import type {
   TickContext,
 } from "../types.js";
 import type BetterSqlite3 from "better-sqlite3";
+import { BALANCE_UNKNOWN } from "../conway/credits.js";
 
 type DatabaseType = BetterSqlite3.Database;
 
@@ -385,9 +386,14 @@ describe("DurableScheduler", () => {
         DEFAULT_HB_CONFIG,
       );
 
-      // Should default to 0 credits (critical tier — zero is broke, not dead)
-      expect(ctx.creditBalance).toBe(0);
-      expect(ctx.survivalTier).toBe("critical");
+      // BEHAVIOUR CHANGE: a failed lookup now yields BALANCE_UNKNOWN, not 0.
+      // Defaulting to 0 made every tick of a credits-API outage report
+      // "critical" and emit a funding distress signal, flooding the agent's
+      // context with an insolvency that was never observed. getFinancialState()
+      // already used the -1 sentinel for exactly this case; buildTickContext
+      // used 0, and the two disagreed. The sentinel is now used in both.
+      expect(ctx.creditBalance).toBe(BALANCE_UNKNOWN);
+      expect(ctx.survivalTier).toBe("low_compute");
     });
   });
 

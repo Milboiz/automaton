@@ -17,6 +17,10 @@ import {
 } from "./mocks.js";
 import type { AutomatonDatabase, ToolContext, AutomatonTool, RiskLevel } from "../types.js";
 
+// write_file confines to $HOME (falling back to /root inside a Conway sandbox),
+// so these expectations must resolve the same way the code does.
+const SANDBOX_HOME_FOR_TEST = process.env.HOME || "/root";
+
 // Mock erc8004.js to avoid ABI parse error
 vi.mock("../registry/erc8004.js", () => ({
   queryAgent: vi.fn(),
@@ -196,7 +200,7 @@ describe("write_file / edit_own_file protection parity", () => {
   it("write_file allows non-protected files inside sandbox home", async () => {
     const writeTool = tools.find((t) => t.name === "write_file")!;
     const result = await writeTool.execute(
-      { path: "/root/test.txt", content: "safe content" },
+      { path: `${SANDBOX_HOME_FOR_TEST}/test.txt`, content: "safe content" },
       ctx,
     );
     expect(result).toContain("File written");
@@ -208,7 +212,7 @@ describe("write_file / edit_own_file protection parity", () => {
       "/etc/passwd",
       "/tmp/evil.sh",
       "/home/automaton/test.txt",
-      "/root/../etc/passwd",
+      `${SANDBOX_HOME_FOR_TEST}/../etc/passwd`,
       "../../etc/shadow",
     ];
     for (const p of outsidePaths) {
@@ -226,9 +230,9 @@ describe("write_file / edit_own_file protection parity", () => {
       { path: "project/file.txt", content: "safe content" },
       ctx,
     );
-    // Relative paths resolve against /root, so "project/file.txt" -> "/root/project/file.txt"
+    // Relative paths resolve against the sandbox home.
     expect(result).toContain("File written");
-    expect(result).toContain("/root/project/file.txt");
+    expect(result).toContain(`${SANDBOX_HOME_FOR_TEST}/project/file.txt`);
   });
 
   it("write_file allows tilde paths within sandbox home", async () => {
@@ -238,7 +242,7 @@ describe("write_file / edit_own_file protection parity", () => {
       ctx,
     );
     expect(result).toContain("File written");
-    expect(result).toContain("/root/.automaton/skills/test/SKILL.md");
+    expect(result).toContain(`${SANDBOX_HOME_FOR_TEST}/.automaton/skills/test/SKILL.md`);
   });
 });
 

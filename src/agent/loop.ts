@@ -375,7 +375,14 @@ export async function runAgentLoop(
   db.setAgentState("running");
   onStateChange?.("running");
 
-  log(config, `[WAKE UP] ${config.name} is alive. Credits: $${(financial.creditsCents / 100).toFixed(2)}`);
+  // Report the sentinel as unknown here too. Printing it as "$-0.01" reads as
+  // debt to an operator scanning the log, the same way it read as debt to the
+  // agent before the prompt was fixed.
+  const creditsDisplay =
+    financial.creditsCents === BALANCE_UNKNOWN
+      ? "unknown (credits API unreachable)"
+      : `$${(financial.creditsCents / 100).toFixed(2)}`;
+  log(config, `[WAKE UP] ${config.name} is alive. Credits: ${creditsDisplay}`);
 
   // ─── The Loop ──────────────────────────────────────────────
 

@@ -34,6 +34,10 @@ const MAX_NOTIONAL = 100;
 const MIN_NOTIONAL = 10;
 /** Trend lookback. L100 is the pre-committed prior that survived out-of-sample testing. */
 const TREND_LOOKBACK_DAYS = 100;
+/** Target BTC weight when the trend is positive. The remainder is a deliberate
+ *  fee buffer: fees are charged on top, so an order sized to the whole cash
+ *  balance is rejected. */
+const TARGET_INVESTED_PCT = 0.95;
 
 export function tradeScriptPath(): string {
   return (
@@ -58,6 +62,70 @@ export interface TradeDecision {
   action: "buy" | "sell" | "hold";
   notional: number;
   reason: string;
+}
+
+/** Minimum gap between actual and target weight before it is worth acting.
+ *  Below this the trade would be noise: the strategy is a slow trend rule, and
+ *  rebalancing on small drift is the churn FINDINGS.md measures as loss-making. */
+const REBALANCE_BAND = 0.05;
+
+export interface Opportunity {
+  act: boolean;
+  reason: string;
+  currentPct: number;
+  targetPct: number;
+}
+
+/**
+ * Cheap, deterministic check for whether there is anything to do.
+ *
+ * This is the whole point of running often: the arithmetic is free, so it can
+ * run every few minutes, and the model is only woken when the position
+ * genuinely diverges from what the trend rule wants. Polling a language model
+ * on a timer asks the same question of unchanged data and pays for the answer
+ * every time.
+ *
+ * No trend reading is NOT an opportunity -- unknown data must never provoke a
+ * trade.
+ */
+export function findOpportunity(params: {
+  cash: number;
+  positionValue: number;
+  trendPct: number | null;
+  targetInvested?: number;
+}): Opportunity {
+  const equity = params.cash + params.positionValue;
+  const targetInvested = params.targetInvested ?? TARGET_INVESTED_PCT;
+  const currentPct = equity > 0 ? params.positionValue / equity : 0;
+
+  if (params.trendPct === null) {
+    return { act: false, reason: "trend unknown -- holding", currentPct, targetPct: currentPct };
+  }
+
+  // The rule is binary: in when the trend is up, out when it is down.
+  const targetPct = params.trendPct > 0 ? targetInvested : 0;
+  const drift = Math.abs(currentPct - targetPct);
+  const driftValue = drift * equity;
+
+  if (driftValue < MIN_NOTIONAL) {
+    return {
+      act: false,
+      reason: `gap $${driftValue.toFixed(2)} is below the $${MIN_NOTIONAL} venue minimum`,
+      currentPct, targetPct,
+    };
+  }
+  if (drift < REBALANCE_BAND) {
+    return {
+      act: false,
+      reason: `within ${(REBALANCE_BAND * 100).toFixed(0)}% band (${(currentPct * 100).toFixed(1)}% vs ${(targetPct * 100).toFixed(0)}% target)`,
+      currentPct, targetPct,
+    };
+  }
+  return {
+    act: true,
+    reason: `${(currentPct * 100).toFixed(1)}% invested vs ${(targetPct * 100).toFixed(0)}% target, trend ${params.trendPct >= 0 ? "+" : ""}${params.trendPct.toFixed(2)}%`,
+    currentPct, targetPct,
+  };
 }
 
 export interface InferenceTarget {
@@ -138,6 +206,7 @@ export async function decideDirection(params: {
   price: number | null;
   trendPct: number | null;
   trendLookback: number;
+  targetPct?: number;
 }): Promise<TradeDecision> {
   const hold = (reason: string): TradeDecision => ({ action: "hold", notional: 0, reason });
 
@@ -146,16 +215,27 @@ export async function decideDirection(params: {
     "",
     `Cash available: $${params.cash.toFixed(2)}`,
     `Current BTC position value: $${params.positionValue.toFixed(2)}`,
+    (() => {
+      const eq = params.cash + params.positionValue;
+      if (eq <= 0) return "Current allocation: unknown";
+      return `Current allocation: ${((params.positionValue / eq) * 100).toFixed(1)}% BTC / ${((params.cash / eq) * 100).toFixed(1)}% cash (equity $${eq.toFixed(2)})`;
+    })(),
+    params.targetPct !== undefined
+      ? `TARGET allocation: ${(params.targetPct * 100).toFixed(0)}% BTC`
+      : "",
     params.price !== null ? `Latest BTC price: $${params.price.toFixed(2)}` : "Latest BTC price: unknown",
     params.trendPct !== null
       ? `${params.trendLookback}-day trend: ${params.trendPct >= 0 ? "+" : ""}${params.trendPct.toFixed(2)}%`
       : `${params.trendLookback}-day trend: unknown`,
     "",
     "The strategy is a pre-committed long-only trend rule, chosen because it was the only",
-    "hypothesis that survived out-of-sample testing on this data:",
-    `  - Trend POSITIVE  -> be IN BTC. If mostly in cash, BUY.`,
-    `  - Trend NEGATIVE  -> be IN CASH. If holding BTC, SELL to reduce exposure.`,
-    "  - Already positioned correctly -> HOLD.",
+    "hypothesis that survived out-of-sample testing on this data. It is BINARY -- fully in",
+    "or fully out. Idle cash in an uptrend is the strategy failing to be applied.",
+    "",
+    "Move the allocation toward the TARGET above:",
+    "  - Below target -> BUY the gap (one order, capped at 100).",
+    "  - Above target -> SELL toward it.",
+    "  - Already there -> HOLD.",
     "",
     "Also respect this: rotating between crypto assets loses money even at zero cost, and",
     "over-trading destroys value. Move in modest steps and do not churn. Never trade merely",
@@ -292,14 +372,27 @@ export const tradeTick = async (
     return { shouldWake: false };
   }
 
-  // 2. The single judgement call.
+  // 2. Is there anything to do? Free arithmetic, so this can run often. The
+  //    model is only woken when the position actually diverges from the rule.
+  const opportunity = findOpportunity({ cash, positionValue, trendPct });
+  if (!opportunity.act) {
+    logger.debug(`no opportunity: ${opportunity.reason}`);
+    taskCtx.db.setKV("last_trade_tick", JSON.stringify({
+      at: new Date().toISOString(), outcome: "NO-OP", reason: opportunity.reason,
+    }));
+    return { shouldWake: false };
+  }
+  logger.info(`opportunity: ${opportunity.reason}`);
+
+  // 3. The single judgement call -- reached only when it is worth making.
   const decision = await decideDirection({
     baseUrl: target.baseUrl, apiKey: target.apiKey, model: target.model,
     cash, positionValue, price,
     trendPct, trendLookback: TREND_LOOKBACK_DAYS,
+    targetPct: opportunity.targetPct,
   });
 
-  // 3. Deterministic execution, with the balance checks the model cannot override.
+  // 4. Deterministic execution, with the balance checks the model cannot override.
   let outcome: string;
   if (decision.action === "hold") {
     outcome = "HOLD";
@@ -319,7 +412,7 @@ export const tradeTick = async (
     }
   }
 
-  // 4. Journal every tick, including holds -- a decision not written down did not happen.
+  // 5. Journal every acted-on tick -- a decision not written down did not happen.
   const entry = [
     `## ${new Date().toISOString()}`,
     `- cash: $${cash.toFixed(2)} | BTC position: $${positionValue.toFixed(2)}` +

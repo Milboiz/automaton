@@ -24,6 +24,7 @@ import { AlertEngine, createDefaultAlertRules } from "../observability/alerts.js
 import { metricsInsertSnapshot, metricsPruneOld } from "../state/database.js";
 import { ulid } from "ulid";
 import { tradeTick } from "./trade-task.js";
+import { superviseTick } from "./supervise-task.js";
 
 const logger = createLogger("heartbeat.tasks");
 
@@ -45,8 +46,13 @@ export const COLONY_TASK_INTERVALS_MS = {
 } as const;
 
 export const BUILTIN_TASKS: Record<string, HeartbeatTaskFn> = {
-  // Scheduled trading. The mechanism is fixed here; the model only picks a
-  // direction. Disabled unless the operator provides a trade script.
+  // Watch the trading engine. Does NOT trade -- the engine owns strategy,
+  // risk, reconciliation and the kill switch, all of it tested. This exists
+  // because the engine sat halted for six days with nothing watching it.
+  supervise_engine: superviseTick,
+
+  // Scheduled trading, for running WITHOUT a separate engine. Leave disabled
+  // when supervise_engine is on: two systems on one account fight each other.
   trade_tick: tradeTick,
 
   heartbeat_ping: async (ctx: TickContext, taskCtx: HeartbeatLegacyContext) => {

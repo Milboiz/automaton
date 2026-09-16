@@ -376,7 +376,10 @@ export const tradeTick = async (
   //    model is only woken when the position actually diverges from the rule.
   const opportunity = findOpportunity({ cash, positionValue, trendPct });
   if (!opportunity.act) {
-    logger.debug(`no opportunity: ${opportunity.reason}`);
+    // Logged at info, not debug, on purpose. A quiet log is how this system's
+    // six-day halt hid in plain sight: "working and correctly idle" and
+    // "wedged" look identical when neither prints anything. Say so out loud.
+    logger.info(`no action: ${opportunity.reason}`);
     taskCtx.db.setKV("last_trade_tick", JSON.stringify({
       at: new Date().toISOString(), outcome: "NO-OP", reason: opportunity.reason,
     }));

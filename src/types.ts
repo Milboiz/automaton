@@ -192,7 +192,12 @@ export interface InboxMessage {
 
 export interface HeartbeatEntry {
   name: string;
+  /** Cron expression. Leave empty and set intervalMs for sub-minute work --
+   *  cron cannot express anything finer than one minute. */
   schedule: string;
+  /** Fixed interval in ms. Takes effect only when `schedule` is empty, because
+   *  the scheduler evaluates cron first. */
+  intervalMs?: number;
   task: string;
   enabled: boolean;
   lastRun?: string;

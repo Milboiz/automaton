@@ -78,6 +78,7 @@ export function loadHeartbeatConfig(configPath?: string): HeartbeatConfig {
     const parsedEntries = (parsed.entries || []).map((e: any) => ({
       name: e.name,
       schedule: e.schedule,
+      intervalMs: typeof e.intervalMs === "number" ? e.intervalMs : undefined,
       task: e.task,
       enabled: e.enabled !== false,
       params: e.params,
@@ -149,7 +150,8 @@ function mergeWithDefaults(entries: HeartbeatEntry[]): HeartbeatEntry[] {
       ...entry,
       enabled: entry.enabled !== false,
       task: entry.task || fallback?.task || "",
-      schedule: entry.schedule || fallback?.schedule || "",
+      schedule: entry.schedule ?? fallback?.schedule ?? "",
+      intervalMs: entry.intervalMs ?? fallback?.intervalMs,
     });
   }
 

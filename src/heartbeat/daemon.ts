@@ -81,7 +81,9 @@ export function createHeartbeatDaemon(
     upsertHeartbeatSchedule(rawDb, {
       taskName: entry.name,
       cronExpression: entry.schedule,
-      intervalMs: null,
+      // Was hardcoded null, which silently wiped any configured interval on
+      // every startup -- sub-minute schedules could never survive a restart.
+      intervalMs: entry.intervalMs ?? null,
       enabled: entry.enabled ? 1 : 0,
       priority: 0,
       timeoutMs: 30_000,

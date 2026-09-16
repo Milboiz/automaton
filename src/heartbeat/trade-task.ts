@@ -39,6 +39,24 @@ const TREND_LOOKBACK_DAYS = 100;
  *  balance is rejected. */
 const TARGET_INVESTED_PCT = 0.95;
 
+/** The trend comes from DAILY bars, so recomputing it every poll fetches 120
+ *  days of history to produce an identical number. Cache it; the underlying
+ *  data cannot change faster than once a day. */
+const TREND_CACHE_MS = 15 * 60 * 1000;
+let _trendCache: { at: number; value: number | null } | null = null;
+
+/** After acting, wait before acting again. Without this a fast poll can fire
+ *  several orders into the same gap before the first fill settles, turning one
+ *  intended trade into a burst. */
+const ACTION_COOLDOWN_MS = 60 * 1000;
+let _lastActionAt = 0;
+
+/** Exposed for tests. */
+export function _resetTradeTickState(): void {
+  _trendCache = null;
+  _lastActionAt = 0;
+}
+
 export function tradeScriptPath(): string {
   return (
     process.env.AUTOMATON_TRADE_SCRIPT ||
@@ -348,8 +366,10 @@ export const tradeTick = async (
     }
 
     // Trend signal. Without it the model has nothing to reason from and can
-    // only ever answer "hold", which is not a strategy.
-    try {
+    // only ever answer "hold", which is not a strategy. Cached: daily bars.
+    if (_trendCache && Date.now() - _trendCache.at < TREND_CACHE_MS) {
+      trendPct = _trendCache.value;
+    } else try {
       const hist = JSON.parse(await runScript("bars", String(TREND_LOOKBACK_DAYS + 20)));
       const series = hist?.bars?.["BTC/USD"];
       if (Array.isArray(series) && series.length > 1) {
@@ -364,6 +384,7 @@ export const tradeTick = async (
           if (past > 0) trendPct = (last / past - 1) * 100;
         }
       }
+      _trendCache = { at: Date.now(), value: trendPct };
     } catch {
       // Unknown trend -> the model is told so, and will hold.
     }
@@ -383,6 +404,13 @@ export const tradeTick = async (
     taskCtx.db.setKV("last_trade_tick", JSON.stringify({
       at: new Date().toISOString(), outcome: "NO-OP", reason: opportunity.reason,
     }));
+    return { shouldWake: false };
+  }
+  const sinceAction = Date.now() - _lastActionAt;
+  if (_lastActionAt && sinceAction < ACTION_COOLDOWN_MS) {
+    logger.info(
+      `opportunity held: ${opportunity.reason} -- ${Math.ceil((ACTION_COOLDOWN_MS - sinceAction) / 1000)}s cooldown`,
+    );
     return { shouldWake: false };
   }
   logger.info(`opportunity: ${opportunity.reason}`);
@@ -405,6 +433,7 @@ export const tradeTick = async (
     outcome = `BLOCKED: wanted to sell $${decision.notional.toFixed(2)} but position is only $${positionValue.toFixed(2)}`;
   } else {
     try {
+      _lastActionAt = Date.now();   // reset the clock on a real action
       const result = await runScript(decision.action, decision.notional.toFixed(2));
       const order = JSON.parse(result);
       outcome = order?.id

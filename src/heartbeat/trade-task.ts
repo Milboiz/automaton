@@ -60,11 +60,77 @@ export interface TradeDecision {
   reason: string;
 }
 
+export interface InferenceTarget {
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+}
+
+/**
+ * Pick an inference provider for the trade decision.
+ *
+ * Groq is preferred when a key is present: its free tier covers this task many
+ * times over (one small call an hour) and it is OpenAI-compatible, so only the
+ * base URL and model differ. OpenAI remains the fallback. Explicit env vars
+ * override both, which is how any other compatible endpoint (NVIDIA NIM,
+ * Together, a local Ollama at :11434/v1) gets used without a code change.
+ *
+ * Returns null when nothing is configured -- the caller then holds rather than
+ * trading on no decision.
+ */
+export function resolveInferenceTarget(config: {
+  openaiApiKey?: string;
+  groqApiKey?: string;
+  modelStrategy?: { lowComputeModel?: string };
+  inferenceModel?: string;
+}): InferenceTarget | null {
+  const envUrl = process.env.AUTOMATON_TRADE_BASE_URL;
+  const envKey = process.env.AUTOMATON_TRADE_API_KEY;
+  if (envUrl && envKey) {
+    return {
+      baseUrl: envUrl.replace(/\/$/, ""),
+      apiKey: envKey,
+      model: process.env.AUTOMATON_TRADE_MODEL || "llama-3.3-70b-versatile",
+    };
+  }
+
+  const groqKey = config.groqApiKey || process.env.GROQ_API_KEY;
+  if (groqKey) {
+    return {
+      baseUrl: "https://api.groq.com/openai/v1",
+      apiKey: groqKey,
+      model: process.env.AUTOMATON_TRADE_MODEL || "llama-3.3-70b-versatile",
+    };
+  }
+
+  const openaiKey = config.openaiApiKey || process.env.OPENAI_API_KEY;
+  if (openaiKey) {
+    return {
+      baseUrl: "https://api.openai.com/v1",
+      apiKey: openaiKey,
+      model:
+        process.env.AUTOMATON_TRADE_MODEL ||
+        config.modelStrategy?.lowComputeModel ||
+        config.inferenceModel ||
+        "gpt-5-mini",
+    };
+  }
+
+  return null;
+}
+
+/** gpt-5-class models reject `max_tokens` and spend the budget on reasoning
+ *  tokens first; llama models on Groq want `max_tokens`. Send the right one. */
+function tokenLimitField(model: string): string {
+  return /^(gpt-5|o[1-9])/i.test(model) ? "max_completion_tokens" : "max_tokens";
+}
+
 /**
  * Ask the model for a direction. Returns a hold on any failure -- an
  * unavailable or malformed answer must never become a trade.
  */
 export async function decideDirection(params: {
+  baseUrl?: string;
   apiKey: string;
   model: string;
   cash: number;
@@ -102,20 +168,24 @@ export async function decideDirection(params: {
 
   let raw: string;
   try {
-    const resp = await fetch("https://api.openai.com/v1/chat/completions", {
+    const baseUrl = (params.baseUrl || "https://api.openai.com/v1").replace(/\/$/, "");
+    const body: Record<string, unknown> = {
+      model: params.model,
+      messages: [{ role: "user", content: prompt }],
+      response_format: { type: "json_object" },
+    };
+    // gpt-5-class models spend this budget on reasoning tokens FIRST, so too
+    // small a value returns empty content and no answer at all. Groq's llama
+    // models do not reason and take the classic field name.
+    body[tokenLimitField(params.model)] = 3000;
+
+    const resp = await fetch(`${baseUrl}/chat/completions`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${params.apiKey}`,
       },
-      body: JSON.stringify({
-        model: params.model,
-        messages: [{ role: "user", content: prompt }],
-        response_format: { type: "json_object" },
-        // gpt-5-class models spend this budget on reasoning tokens FIRST. Too
-        // small a value returns an empty content string and no answer at all.
-        max_completion_tokens: 3000,
-      }),
+      body: JSON.stringify(body),
       signal: AbortSignal.timeout(60_000),
     });
     if (!resp.ok) {
@@ -168,9 +238,9 @@ export const tradeTick = async (
     return { shouldWake: false };
   }
 
-  const apiKey = taskCtx.config.openaiApiKey || process.env.OPENAI_API_KEY;
-  if (!apiKey) {
-    logger.warn("no inference key available for trade decision; holding");
+  const target = resolveInferenceTarget(taskCtx.config as any);
+  if (!target) {
+    logger.warn("no inference provider configured for trade decision; holding");
     return { shouldWake: false };
   }
 
@@ -223,12 +293,9 @@ export const tradeTick = async (
   }
 
   // 2. The single judgement call.
-  const model =
-    taskCtx.config.modelStrategy?.lowComputeModel ||
-    taskCtx.config.inferenceModel ||
-    "gpt-5-mini";
   const decision = await decideDirection({
-    apiKey, model, cash, positionValue, price,
+    baseUrl: target.baseUrl, apiKey: target.apiKey, model: target.model,
+    cash, positionValue, price,
     trendPct, trendLookback: TREND_LOOKBACK_DAYS,
   });
 
@@ -258,7 +325,7 @@ export const tradeTick = async (
     `- cash: $${cash.toFixed(2)} | BTC position: $${positionValue.toFixed(2)}` +
       (price !== null ? ` | price: $${price.toFixed(2)}` : "") +
       (trendPct !== null ? ` | ${TREND_LOOKBACK_DAYS}d trend: ${trendPct >= 0 ? "+" : ""}${trendPct.toFixed(2)}%` : ""),
-    `- model (${model}) said: ${decision.action}${decision.notional ? ` $${decision.notional.toFixed(2)}` : ""}`,
+    `- model (${target.model} @ ${new URL(target.baseUrl).host}) said: ${decision.action}${decision.notional ? ` $${decision.notional.toFixed(2)}` : ""}`,
     `- reason: ${decision.reason}`,
     `- outcome: ${outcome}`,
     "",
@@ -269,7 +336,7 @@ export const tradeTick = async (
     logger.warn(`could not write journal: ${err?.message || String(err)}`);
   }
 
-  logger.info(`trade tick: ${outcome} (${decision.reason})`);
+  logger.info(`trade tick [${target.model}]: ${outcome} (${decision.reason})`);
   taskCtx.db.setKV("last_trade_tick", JSON.stringify({ at: new Date().toISOString(), outcome }));
 
   return { shouldWake: false, message: outcome.startsWith("HOLD") ? undefined : `Trade: ${outcome}` };
